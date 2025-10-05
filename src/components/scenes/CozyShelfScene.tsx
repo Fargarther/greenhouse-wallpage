@@ -23,21 +23,43 @@ interface Placement {
   row: RowKey;
 }
 
+interface RowLayout {
+  baseline: number;
+  baseSize: number;
+  growthBoost: number;
+  xPositions: number[];
+}
+
 interface LayoutConfig {
   width: number;
   height: number;
   horizontalPadding: number;
-  rows: Record<RowKey, { baseline: number }>;
+  rows: Record<RowKey, RowLayout>;
 }
 
 const layout: LayoutConfig = {
   width: 1200,
   height: 720,
-  horizontalPadding: 140,
+  horizontalPadding: 120,
   rows: {
-    top: { baseline: 210 },
-    middle: { baseline: 350 },
-    bottom: { baseline: 560 },
+    top: {
+      baseline: 230,
+      baseSize: 150,
+      growthBoost: 60,
+      xPositions: [0.18, 0.36, 0.54, 0.72, 0.86],
+    },
+    middle: {
+      baseline: 360,
+      baseSize: 180,
+      growthBoost: 70,
+      xPositions: [0.16, 0.32, 0.48, 0.64, 0.8],
+    },
+    bottom: {
+      baseline: 555,
+      baseSize: 210,
+      growthBoost: 90,
+      xPositions: [0.12, 0.28, 0.44, 0.6, 0.76, 0.9],
+    },
   },
 };
 
@@ -45,41 +67,50 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function computePlacements(seeds: Seed[]): Placement[] {
-  const filtered = seeds.filter((seed) => !seed.deleted);
-  const ordered = [...filtered].sort((a, b) => hashString(a.id) - hashString(b.id));
-
+function assignRows(seeds: Seed[]): Record<RowKey, Seed[]> {
+  const cycle: RowKey[] = ["bottom", "middle", "bottom", "top"];
   const buckets: Record<RowKey, Seed[]> = {
     top: [],
     middle: [],
     bottom: [],
   };
 
-  ordered.forEach((seed, index) => {
-    const bucket = index % 3;
-    if (bucket === 0) buckets.top.push(seed);
-    else if (bucket === 1) buckets.middle.push(seed);
-    else buckets.bottom.push(seed);
+  seeds.forEach((seed, index) => {
+    const rowKey = cycle[index % cycle.length];
+    buckets[rowKey].push(seed);
   });
 
+  return buckets;
+}
+
+function computePlacements(seeds: Seed[]): Placement[] {
+  const filtered = seeds.filter((seed) => !seed.deleted);
+  if (filtered.length === 0) {
+    return [];
+  }
+
+  const ordered = [...filtered].sort((a, b) => hashString(a.id) - hashString(b.id));
+  const buckets = assignRows(ordered);
   const placements: Placement[] = [];
 
   (Object.keys(buckets) as RowKey[]).forEach((rowKey) => {
     const rowSeeds = buckets[rowKey];
     const row = layout.rows[rowKey];
-    const slotCount = rowSeeds.length;
+    if (rowSeeds.length === 0) {
+      return;
+    }
 
     rowSeeds.forEach((seed, index) => {
-      const baseRandom = mulberry32(hashString(`${seed.id}-${rowKey}`));
+      const rng = mulberry32(hashString(`${seed.id}-${rowKey}`));
       const growthFactor = clamp(seed.growth / 100, 0, 1);
-      const baseSize = rowKey === "bottom" ? 200 : rowKey === "middle" ? 180 : 160;
-      const size = baseSize + growthFactor * 90;
-      const ratio = slotCount > 1 ? index / (slotCount - 1) : 0.5;
-      const jitter = (baseRandom() - 0.5) * 0.18;
-      const paddingRatio = layout.horizontalPadding / layout.width;
-      const xRatio = clamp(paddingRatio + ratio * (1 - paddingRatio * 2) + jitter, 0.12, 0.88);
-      const baseline = row.baseline + randIn(baseRandom(), -6, 4);
-      const top = baseline - size;
+      const size = row.baseSize + growthFactor * row.growthBoost;
+      const slotIndex = index % row.xPositions.length;
+      const wraps = Math.floor(index / row.xPositions.length);
+      const jitter = (rng() - 0.5) * (0.05 + wraps * 0.02);
+      const baseRatio = row.xPositions[slotIndex];
+      const xRatio = clamp(baseRatio + jitter, 0.08, 0.92);
+      const baselineOffset = randIn(rng(), -10, 8);
+      const top = row.baseline + baselineOffset - size;
 
       placements.push({
         seed,
@@ -91,7 +122,7 @@ function computePlacements(seeds: Seed[]): Placement[] {
     });
   });
 
-  return placements;
+  return placements.sort((a, b) => (a.row === b.row ? a.leftPercent - b.leftPercent : a.row === "bottom" ? 1 : -1));
 }
 
 export function CozyShelfScene({ seeds, staticMode = false, onGrow, showGrowHints = false }: CozyShelfSceneProps) {
@@ -99,49 +130,76 @@ export function CozyShelfScene({ seeds, staticMode = false, onGrow, showGrowHint
 
   return (
     <div className="relative h-full w-full min-h-[720px] overflow-hidden rounded-[3rem] bg-emerald-100/80 shadow-2xl">
-      <div className="absolute inset-0 bg-gradient-to-br from-emerald-200/60 via-emerald-100 to-emerald-200/70" />
+      <div className="absolute inset-0 bg-gradient-to-br from-emerald-50 via-emerald-100 to-emerald-200" />
 
-      <div className="absolute inset-x-10 top-8 h-[540px]">
-        <svg className="absolute inset-0 h-full w-full" viewBox="0 0 800 540" aria-hidden="true">
+      <div className="absolute inset-0">
+        <svg className="absolute inset-0 h-full w-full" viewBox="0 0 1200 720" aria-hidden="true">
           <defs>
-            <pattern id="tile-dots" width="28" height="24" patternUnits="userSpaceOnUse">
-              <circle cx="6" cy="6" r="2.2" fill="rgba(255,255,255,0.35)" />
-              <circle cx="20" cy="12" r="2.2" fill="rgba(255,255,255,0.2)" />
-              <circle cx="6" cy="18" r="2.2" fill="rgba(255,255,255,0.28)" />
+            <pattern id="mosaic" width="40" height="40" patternUnits="userSpaceOnUse">
+              <rect width="40" height="40" fill="none" />
+              <circle cx="12" cy="14" r="9" fill="rgba(222, 237, 228, 0.6)" />
+              <circle cx="28" cy="6" r="9" fill="rgba(202, 219, 208, 0.5)" />
+              <circle cx="30" cy="28" r="10" fill="rgba(200, 214, 202, 0.45)" />
+              <circle cx="8" cy="30" r="11" fill="rgba(210, 228, 214, 0.55)" />
             </pattern>
           </defs>
           <path
-            d="M0 540 V190 Q0 0 400 0 Q800 0 800 190 V540 Z M96 540 V210 Q96 68 400 68 Q704 68 704 210 V540 Z"
-            fill="url(#tile-dots)"
+            d="M0 720 V180 Q0 0 600 0 Q1200 0 1200 180 V720 Z M140 720 V220 Q140 60 600 60 Q1060 60 1060 220 V720 Z"
+            fill="url(#mosaic)"
             fillRule="evenodd"
-            opacity="0.4"
+            opacity="0.65"
           />
         </svg>
-        <div className="absolute inset-6 rounded-[260px] bg-gradient-to-br from-emerald-50 via-emerald-100 to-emerald-200 shadow-[0_40px_90px_-40px_rgba(32,64,36,0.55)]" />
-        <div className="absolute left-1/2 top-[18%] h-[220px] w-[360px] -translate-x-1/2 rounded-[3rem] border border-emerald-200/60 bg-gradient-to-b from-sky-100 via-sky-50 to-sky-100 shadow-inner">
-          <div className="absolute inset-[14%] rounded-[2.2rem] border border-white/50" />
-          <div className="absolute inset-x-[48%] top-0 h-full border-l border-white/50" />
-          <div className="absolute left-0 right-0 top-1/2 h-px bg-white/40" />
-        </div>
       </div>
 
-      <div className="absolute left-24 right-24 top-[43%] h-4 rounded-full bg-emerald-300/80 shadow-[0_16px_24px_-16px_rgba(15,40,24,0.4)]" />
-      <div className="absolute left-32 right-32 top-[54%] h-4 rounded-full bg-emerald-400/70 shadow-[0_18px_28px_-16px_rgba(15,40,24,0.4)]" />
+      <div className="absolute inset-12 rounded-[280px] bg-gradient-to-br from-emerald-200/40 via-emerald-100 to-emerald-200/70" />
 
-      <div className="absolute left-20 right-20 bottom-36 h-28 rounded-3xl bg-gradient-to-br from-white via-white to-emerald-50 shadow-[0_30px_50px_-20px_rgba(12,30,20,0.35)]">
+      <div className="absolute left-1/2 top-[16%] h-[240px] w-[420px] -translate-x-1/2 rounded-[3rem] border border-emerald-300/70 bg-gradient-to-b from-sky-100 via-sky-50 to-sky-100 shadow-inner">
+        <div className="absolute inset-[14%] rounded-[2.5rem] border border-white/60" />
+        <div className="absolute inset-x-[48%] top-0 h-full border-l border-white/50" />
+        <div className="absolute left-0 right-0 top-1/2 h-px bg-white/50" />
+        <div className="absolute left-0 right-0 top-[20%] h-px bg-white/30" />
+      </div>
+
+      <div className="absolute left-24 right-24 top-[38%] h-5 rounded-full bg-[#a26c3c] shadow-[0_22px_35px_-20px_rgba(50,35,10,0.45)]" />
+      <div className="absolute left-28 right-28 top-[52%] h-5 rounded-full bg-[#b7773f] shadow-[0_24px_36px_-20px_rgba(52,32,12,0.4)]" />
+
+      <div className="absolute left-24 right-24 bottom-[136px] h-32 rounded-[2.5rem] bg-gradient-to-br from-white via-white to-emerald-50 shadow-[0_35px_60px_-28px_rgba(20,30,20,0.45)]">
+        <div className="absolute inset-0 rounded-[2.5rem] border border-emerald-200/60" />
         <svg className="absolute inset-0 h-full w-full" viewBox="0 0 800 140" aria-hidden="true">
           <path
-            d="M0 94 Q200 64 380 94 T760 94"
+            d="M0 102 Q220 72 400 94 T800 102"
             fill="none"
-            stroke="rgba(92,112,104,0.25)"
+            stroke="rgba(120,140,132,0.35)"
             strokeWidth="3"
             strokeLinecap="round"
           />
         </svg>
       </div>
 
-      <div className="absolute bottom-12 left-16 h-32 w-36 rounded-3xl bg-emerald-400/70 shadow-[0_25px_45px_-18px_rgba(20,40,24,0.45)]" />
-      <div className="absolute bottom-14 right-20 h-28 w-14 rounded-[24px] bg-emerald-500/80 shadow-[0_22px_38px_-18px_rgba(10,30,18,0.45)]" />
+      <div className="absolute bottom-24 left-20 h-40 w-40 rounded-[26px] bg-emerald-400/75 shadow-[0_32px_48px_-22px_rgba(20,50,30,0.45)]">
+        <div className="absolute inset-4 rounded-[20px] border-2 border-emerald-500/50" />
+        <div className="absolute inset-x-6 bottom-6 h-3 rounded-full bg-emerald-600/40" />
+      </div>
+
+      <div className="absolute bottom-[72px] right-28 h-36 w-16 rounded-[26px] bg-emerald-500/80 shadow-[0_26px_42px_-20px_rgba(12,42,24,0.5)]" />
+      <div className="absolute bottom-12 right-60 h-48 w-18 rounded-[32px] bg-[#c9934d]/85 shadow-[0_30px_40px_-24px_rgba(80,40,10,0.4)]" />
+
+      <div className="absolute bottom-12 left-1/2 h-40 w-40 -translate-x-1/2 rounded-full border-4 border-[#d8b077]/70" />
+      <div className="absolute bottom-16 left-1/2 h-32 w-32 -translate-x-1/2 rounded-full border-4 border-[#e5c08a]/60" />
+
+      <div className="absolute left-16 top-[40%] h-[180px] w-[150px] rounded-[26px] border-4 border-emerald-300/70 bg-emerald-200/35">
+        <div className="absolute inset-4 grid grid-cols-2 gap-3 p-3">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div key={index} className="rounded-[14px] border border-emerald-300/60 bg-emerald-100/70" />
+          ))}
+        </div>
+      </div>
+
+      <div className="absolute right-20 top-[32%] flex flex-col gap-6">
+        <div className="h-16 w-36 rounded-[18px] bg-[#b7773f] shadow-[0_22px_28px_-18px_rgba(60,35,12,0.4)]" />
+        <div className="h-16 w-40 rounded-[18px] bg-[#b7773f] shadow-[0_22px_28px_-18px_rgba(60,35,12,0.4)]" />
+      </div>
 
       <div className="relative z-10 flex h-full w-full flex-col items-stretch">
         <div className="relative flex-1">
@@ -198,3 +256,4 @@ export function CozyShelfScene({ seeds, staticMode = false, onGrow, showGrowHint
     </div>
   );
 }
+
