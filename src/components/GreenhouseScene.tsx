@@ -1,23 +1,27 @@
 'use client';
 
-import { Canvas, useFrame } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Edges, Float } from '@react-three/drei';
-import { Suspense, useMemo, useRef } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { speciesPresets } from '@/lib/memory-garden/presets';
+import { createSeedHash } from '@/lib/memory-garden/random';
+import { generateLSystemStructure } from '@/lib/memory-garden/lsystem';
+import { generateVineStructure } from '@/lib/memory-garden/space-colonization';
+import type { DropRequest, DropResult, MemoryMood, RuntimePlant } from '@/lib/memory-garden/types';
+
+type GreenhouseSceneProps = {
+  plants: RuntimePlant[];
+  onSoilReady?: (mesh: THREE.Mesh) => void;
+  dropRequest?: DropRequest | null;
+  onDropResolved?: (result: DropResult) => void;
+};
 
 type LayerProps = {
   color: string;
   position: [number, number, number];
   size: [number, number];
   outline?: string;
-};
-
-type PlantProps = {
-  baseColor: string;
-  highlightColor: string;
-  position: [number, number, number];
-  scale?: number;
-  swayOffset?: number;
 };
 
 type DustProps = {
@@ -48,12 +52,61 @@ function createGradientTexture(stops: string[]) {
 
 const gradientTexture = createGradientTexture(['#f7f2ea', '#dcd3c2', '#b0a899']);
 
+function adjustHexColor(hex: string, adjustments: { h?: number; s?: number; l?: number }) {
+  const color = new THREE.Color(hex);
+  const hsl = { h: 0, s: 0, l: 0 };
+  color.getHSL(hsl);
+  const nextH = THREE.MathUtils.euclideanModulo(hsl.h + (adjustments.h ?? 0), 1);
+  const nextS = THREE.MathUtils.clamp(hsl.s + (adjustments.s ?? 0), 0, 1);
+  const nextL = THREE.MathUtils.clamp(hsl.l + (adjustments.l ?? 0), 0, 1);
+  color.setHSL(nextH, nextS, nextL);
+  return `#${color.getHexString()}`;
+}
+
+function deriveMoodPalette(
+  baseLeaf: string,
+  baseBloom: string | undefined,
+  baseBranch: string,
+  mood?: MemoryMood
+) {
+  let leaf = baseLeaf;
+  let bloom = baseBloom;
+  let branch = baseBranch;
+
+  switch (mood) {
+    case 'calm':
+      leaf = adjustHexColor(leaf, { h: -0.015, s: -0.08, l: 0.05 });
+      branch = adjustHexColor(branch, { s: -0.06, l: 0.04 });
+      if (bloom) bloom = adjustHexColor(bloom, { s: -0.05, l: 0.06 });
+      break;
+    case 'happy':
+      leaf = adjustHexColor(leaf, { h: 0.02, s: 0.18, l: 0.08 });
+      branch = adjustHexColor(branch, { s: 0.12, l: 0.05 });
+      if (bloom) bloom = adjustHexColor(bloom, { s: 0.22, l: 0.1 });
+      break;
+    case 'melancholy':
+      leaf = adjustHexColor(leaf, { h: -0.03, s: -0.22, l: -0.05 });
+      branch = adjustHexColor(branch, { s: -0.12, l: -0.05 });
+      if (bloom) bloom = adjustHexColor(bloom, { s: -0.12, l: -0.06 });
+      break;
+    case 'celebration':
+      leaf = adjustHexColor(leaf, { h: 0.04, s: 0.25, l: 0.06 });
+      branch = adjustHexColor(branch, { s: 0.18, l: 0.02 });
+      if (bloom) bloom = adjustHexColor(bloom, { s: 0.25, l: 0.08 });
+      break;
+    default:
+      break;
+  }
+
+  return { leaf, bloom, branch };
+}
+
 function Layer({ color, position, size, outline }: LayerProps) {
   return (
     <mesh position={position}>
       <planeGeometry args={size} />
       <meshToonMaterial color={color} gradientMap={gradientTexture} />
-      {outline ? <Edges linewidth={1} color={outline} /> : null}
+      {outline ? <Edges color={outline} /> : null}
     </mesh>
   );
 }
@@ -64,12 +117,10 @@ function MarbleTable() {
       <mesh position={[0, 0.2, 0]} scale={[2.8, 0.36, 1.6]}>
         <boxGeometry />
         <meshToonMaterial color="#f1eae2" gradientMap={gradientTexture} />
-        <Edges color="#cfc3b6" />
       </mesh>
       <mesh position={[0, 0.42, 0]} scale={[3.1, 0.08, 1.9]}>
         <boxGeometry />
         <meshToonMaterial color="#e8dfd3" gradientMap={gradientTexture} />
-        <Edges color="#cfc3b6" />
       </mesh>
     </group>
   );
@@ -81,39 +132,10 @@ function Backpack() {
       <mesh position={[0, 0.5, 0]} scale={[0.7, 0.9, 0.22]}>
         <boxGeometry />
         <meshToonMaterial color="#9c7564" gradientMap={gradientTexture} />
-        <Edges color="#5b4238" />
       </mesh>
       <mesh position={[0, 0.12, -0.18]} scale={[0.58, 0.24, 0.12]}>
         <boxGeometry />
         <meshToonMaterial color="#ae8573" gradientMap={gradientTexture} />
-        <Edges color="#5b4238" />
-      </mesh>
-    </group>
-  );
-}
-
-function Plant({ baseColor, highlightColor, position, scale = 1, swayOffset = 0 }: PlantProps) {
-  const group = useRef<THREE.Group>(null);
-
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime();
-    if (!group.current) return;
-
-    const sway = Math.sin(t / 3 + swayOffset) * 0.06;
-    const bob = Math.sin(t / 4 + swayOffset) * 0.04;
-    group.current.rotation.z = sway;
-    group.current.position.y = position[1] + bob;
-  });
-
-  return (
-    <group ref={group} position={position} scale={[scale, scale, scale]}>
-      <mesh position={[0, 0.4, 0]} scale={[0.16, 0.8, 0.02]}>
-        <boxGeometry />
-        <meshToonMaterial color={baseColor} gradientMap={gradientTexture} />
-      </mesh>
-      <mesh position={[0, 0.85, 0]} scale={[0.4, 0.45, 0.02]}>
-        <boxGeometry />
-        <meshToonMaterial color={highlightColor} gradientMap={gradientTexture} />
       </mesh>
     </group>
   );
@@ -121,9 +143,8 @@ function Plant({ baseColor, highlightColor, position, scale = 1, swayOffset = 0 
 
 function DustParticles({ count = 28, area = [6, 4, 1.5] }: DustProps) {
   const particles = useMemo(() => {
-    return Array.from({ length: count }, (_, index) => {
+    return Array.from({ length: count }, () => {
       return {
-        offset: index * 0.2,
         position: new THREE.Vector3(
           (Math.random() - 0.5) * area[0],
           Math.random() * area[1],
@@ -139,13 +160,7 @@ function DustParticles({ count = 28, area = [6, 4, 1.5] }: DustProps) {
   return (
     <group>
       {particles.map((particle, index) => (
-        <Float
-          key={index}
-          speed={particle.speed}
-          rotationIntensity={0.1}
-          floatIntensity={0.05}
-          floatingRange={[0.04, 0.08]}
-        >
+        <Float key={index} speed={particle.speed} rotationIntensity={0.1} floatIntensity={0.05} floatingRange={[0.04, 0.08]}>
           <mesh position={particle.position}>
             <sphereGeometry args={[particle.size, 8, 8]} />
             <meshBasicMaterial color="#ffffff" transparent opacity={particle.opacity} />
@@ -171,56 +186,218 @@ function CameraRig() {
   return null;
 }
 
-function GreenhouseInterior() {
+function SoilPlane({ onReady }: { onReady?: (mesh: THREE.Mesh) => void }) {
+  const mesh = useRef<THREE.Mesh>(null);
+  useEffect(() => {
+    if (mesh.current && onReady) onReady(mesh.current);
+  }, [onReady]);
+  return (
+    <mesh ref={mesh} position={[0, -0.58, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <planeGeometry args={[14, 6]} />
+      <meshToonMaterial color="#eae3d8" gradientMap={gradientTexture} />
+    </mesh>
+  );
+}
+
+function DropProjector({
+  request,
+  soil,
+  onComplete,
+}: {
+  request: DropRequest | null | undefined;
+  soil: THREE.Object3D | null;
+  onComplete?: (result: DropResult) => void;
+}) {
+  const { camera, gl } = useThree();
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+
+  useEffect(() => {
+    if (!request || !soil || !onComplete) return;
+    const rect = gl.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((request.screen.x - rect.left) / rect.width) * 2 - 1,
+      -(((request.screen.y - rect.top) / rect.height) * 2 - 1)
+    );
+    raycaster.setFromCamera(ndc, camera);
+    const intersections = raycaster.intersectObject(soil, true);
+    const point = intersections.length > 0 ? intersections[0].point.clone() : null;
+    onComplete({ id: request.id, point });
+  }, [camera, gl, onComplete, raycaster, request, soil]);
+
+  return null;
+}
+
+function ProceduralPlant({ plant }: { plant: RuntimePlant }) {
+  const preset = speciesPresets[plant.species];
+  const groupRef = useRef<THREE.Group>(null);
+  const baseSeed = useMemo(() => createSeedHash(plant.id), [plant.id]);
+  const phase = useMemo(() => baseSeed(), [baseSeed]);
+  const stage = Math.min(Math.max(1, plant.growthStage), plant.targetStage);
+
+  const palette = useMemo(() => {
+    const baseLeaf = preset.preset.leafColor;
+    const baseBloom =
+      preset.method === 'lsystem' ? preset.preset.bloomColor : '#d4f1cd';
+    const baseBranch = preset.method === 'lsystem' ? '#806d59' : '#5f7d5d';
+    let { leaf, bloom, branch } = deriveMoodPalette(
+      baseLeaf,
+      baseBloom,
+      baseBranch,
+      plant.metadata.mood
+    );
+    if (plant.metadata.importance === 'high') {
+      branch = adjustHexColor(branch, { l: -0.06, s: 0.05 });
+      leaf = adjustHexColor(leaf, { l: -0.02, s: 0.04 });
+      if (bloom) bloom = adjustHexColor(bloom, { s: 0.06, l: 0.04 });
+    } else if (plant.metadata.importance === 'low') {
+      branch = adjustHexColor(branch, { l: 0.05, s: -0.05 });
+      leaf = adjustHexColor(leaf, { l: 0.07, s: -0.05 });
+      if (bloom) bloom = adjustHexColor(bloom, { s: -0.05 });
+    }
+    return { leaf, bloom, branch };
+  }, [plant.metadata.importance, plant.metadata.mood, preset]);
+
+  const structure = useMemo(() => {
+    const rng = createSeedHash(`${plant.id}-${stage}`);
+    if (preset.method === 'lsystem') {
+      const config = {
+        ...preset.preset,
+        leafColor: palette.leaf,
+        bloomColor: palette.bloom ?? preset.preset.bloomColor,
+      };
+      return generateLSystemStructure(config, stage, rng);
+    }
+    const config = { ...preset.preset, leafColor: palette.leaf };
+    return generateVineStructure(config, stage, rng, palette.bloom ?? '#d4f1cd');
+  }, [palette, plant.id, preset, stage]);
+
+  const branchMaterial = useMemo(
+    () =>
+      new THREE.MeshToonMaterial({
+        color: palette.branch,
+        gradientMap: gradientTexture,
+      }),
+    [palette.branch]
+  );
+  useEffect(() => () => branchMaterial.dispose(), [branchMaterial]);
+
+  const leafGeometry = useMemo(() => new THREE.PlaneGeometry(0.4, 0.9, 1, 1), []);
+  useEffect(() => () => leafGeometry.dispose(), [leafGeometry]);
+
+  const bloomGeometry = useMemo(() => new THREE.SphereGeometry(0.25, 12, 12), []);
+  useEffect(() => () => bloomGeometry.dispose(), [bloomGeometry]);
+
+  const swayStrength = useMemo(() => {
+    switch (plant.metadata.mood) {
+      case 'calm':
+        return 0.035;
+      case 'happy':
+        return 0.075;
+      case 'melancholy':
+        return 0.025;
+      case 'celebration':
+        return 0.09;
+      default:
+        return 0.05;
+    }
+  }, [plant.metadata.mood]);
+
+  const importanceScale =
+    plant.metadata.importance === 'high'
+      ? 1.18
+      : plant.metadata.importance === 'low'
+        ? 0.92
+        : 1;
+
+  useFrame(({ clock }) => {
+    if (!groupRef.current) return;
+    const t = clock.getElapsedTime();
+    groupRef.current.rotation.z = Math.sin(t * 0.12 + phase * Math.PI * 2) * swayStrength;
+    groupRef.current.rotation.x = Math.sin(t * 0.1 + phase) * swayStrength * 0.4;
+  });
+
+  return (
+    <group ref={groupRef} position={plant.position} scale={[importanceScale, importanceScale, importanceScale]}>
+      {structure.segments.map((segment, index) => {
+        const start = new THREE.Vector3(...segment.start);
+        const end = new THREE.Vector3(...segment.end);
+        const delta = end.clone().sub(start);
+        const length = delta.length();
+        const midPoint = start.clone().addScaledVector(delta, 0.5);
+        const orientation = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), delta.clone().normalize());
+        return (
+          <mesh key={`branch-${plant.id}-${index}`} position={midPoint} quaternion={orientation} material={branchMaterial}>
+            <cylinderGeometry args={[segment.radius * 0.8, segment.radius, length, 6]} />
+          </mesh>
+        );
+      })}
+
+      {structure.leaves.map((leaf, index) => (
+        <mesh
+          key={`leaf-${plant.id}-${index}`}
+          position={leaf.position}
+          rotation={leaf.rotation}
+          scale={[leaf.scale, leaf.scale, leaf.scale]}
+        >
+          <primitive object={leafGeometry} attach="geometry" />
+          <meshToonMaterial color={leaf.color} gradientMap={gradientTexture} side={THREE.DoubleSide} />
+        </mesh>
+      ))}
+
+      {structure.blooms.map((bloom, index) => (
+        <mesh
+          key={`bloom-${plant.id}-${index}`}
+          position={bloom.position}
+          rotation={bloom.rotation}
+          scale={[bloom.scale, bloom.scale, bloom.scale]}
+        >
+          <primitive object={bloomGeometry} attach="geometry" />
+          <meshToonMaterial color={bloom.color} gradientMap={gradientTexture} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function GreenhouseInterior({
+  plants,
+  onSoilReady,
+}: {
+  plants: RuntimePlant[];
+  onSoilReady?: (mesh: THREE.Mesh) => void;
+}) {
   return (
     <>
       <Layer color="#f2ede4" outline="#d1c8bc" position={[0, 0, -2.4]} size={[26, 16]} />
       <Layer color="#e0d7cb" outline="#c3b9aa" position={[0, 0.02, -1.4]} size={[20, 12]} />
       <Layer color="#d6cec2" outline="#b3aa9f" position={[0, 0.01, -0.7]} size={[15, 9]} />
 
-      <mesh position={[0, -1, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <planeGeometry args={[14, 6]} />
-        <meshToonMaterial color="#eae3d8" gradientMap={gradientTexture} />
-        <Edges color="#cfc3b6" />
-      </mesh>
+      <SoilPlane onReady={onSoilReady} />
 
       <MarbleTable />
       <Backpack />
 
-      <group position={[-1.6, -0.2, 0.25]}>
-        <Plant baseColor="#88a88f" highlightColor="#a2c0a5" position={[0, 0, 0]} swayOffset={0} />
-        <Plant
-          baseColor="#7c9f8a"
-          highlightColor="#b1cbb2"
-          position={[0.38, 0.25, -0.12]}
-          scale={0.95}
-          swayOffset={1.2}
-        />
-      </group>
-
-      <group position={[0.55, -0.18, 0.32]}>
-        <Plant
-          baseColor="#90b19c"
-          highlightColor="#bfd7c5"
-          position={[0, 0, 0]}
-          scale={1.15}
-          swayOffset={2.1}
-        />
-        <Plant
-          baseColor="#7fa48f"
-          highlightColor="#b7d1bc"
-          position={[-0.34, 0.16, -0.12]}
-          scale={0.88}
-          swayOffset={2.7}
-        />
-      </group>
+      {plants.map((plant) => (
+        <ProceduralPlant key={plant.id} plant={plant} />
+      ))}
 
       <DustParticles />
     </>
   );
 }
 
-export function GreenhouseScene() {
+export function GreenhouseScene({ plants, onSoilReady, dropRequest, onDropResolved }: GreenhouseSceneProps) {
+  const [soilMesh, setSoilMesh] = useState<THREE.Mesh | null>(null);
+
+  const handleSoilReady = (mesh: THREE.Mesh) => {
+    setSoilMesh(mesh);
+    onSoilReady?.(mesh);
+  };
+
+  const handleDrop = (result: DropResult) => {
+    onDropResolved?.(result);
+  };
+
   return (
     <Canvas
       orthographic
@@ -233,8 +410,9 @@ export function GreenhouseScene() {
       <ambientLight intensity={0.7} />
       <directionalLight position={[3, 5, 2]} intensity={1.1} color="#fff9f4" />
       <Suspense fallback={null}>
-        <GreenhouseInterior />
+        <GreenhouseInterior plants={plants} onSoilReady={handleSoilReady} />
       </Suspense>
+      <DropProjector request={dropRequest} soil={soilMesh} onComplete={handleDrop} />
       <CameraRig />
     </Canvas>
   );
